@@ -79,8 +79,8 @@ function PulsingMarker({ map, position, color }) {
     return null
 }
 
-// Search bar component
-function SearchBar({ map, onPlaceSelected }) {
+// Search bar component for adding stops
+function SearchBar({ map, onAddStop }) {
     const inputRef = useRef(null)
     const autocompleteRef = useRef(null)
 
@@ -94,31 +94,247 @@ function SearchBar({ map, onPlaceSelected }) {
             if (place.geometry && place.geometry.location) {
                 const lat = place.geometry.location.lat()
                 const lng = place.geometry.location.lng()
-                onPlaceSelected({ lat, lng, name: place.name })
+                onAddStop({ lat, lng, name: place.name })
+                inputRef.current.value = '' // Clear input after adding
             }
         })
-    }, [map, onPlaceSelected])
+    }, [map, onAddStop])
 
     return (
         <div className="search-container">
             <input
                 ref={inputRef}
                 type="text"
-                placeholder="Search for a place..."
+                placeholder="Search for a place to add as stop..."
                 className="search-input"
             />
         </div>
     )
 }
 
+// Stop item component with drag and drop and enhanced editing
+function StopItem({
+    stop,
+    index,
+    onDelete,
+    onEdit,
+    onDragStart,
+    onDragOver,
+    onDrop,
+    isDragging,
+    travelInfo,
+    map
+}) {
+    const [isEditing, setIsEditing] = useState(false)
+    const inputRef = useRef(null)
+    const autocompleteRef = useRef(null)
+    const [editValue, setEditValue] = useState(stop.name)
+
+    useEffect(() => {
+        if (!isEditing || !map || !inputRef.current) return
+        
+        autocompleteRef.current = new window.google.maps.places.Autocomplete(inputRef.current)
+        autocompleteRef.current.setFields(['geometry', 'name'])
+        
+        const handlePlaceChanged = () => {
+            const place = autocompleteRef.current.getPlace()
+            console.log('Place selected:', place)
+            if (place.geometry && place.geometry.location) {
+                const lat = place.geometry.location.lat()
+                const lng = place.geometry.location.lng()
+                console.log('Updating stop with new location:', { lat, lng, name: place.name })
+                onEdit(index, { lat, lng, name: place.name })
+                setIsEditing(false)
+            }
+        }
+        
+        autocompleteRef.current.addListener('place_changed', handlePlaceChanged)
+        
+        // Clean up
+        return () => {
+            if (autocompleteRef.current) {
+                window.google.maps.event.clearInstanceListeners(autocompleteRef.current)
+            }
+        }
+    }, [isEditing, map, index, onEdit])
+
+    const handleEditClick = () => {
+        setIsEditing(true)
+        setEditValue(stop.name)
+    }
+
+    const handleInputBlur = () => {
+        setIsEditing(false)
+    }
+
+    return (
+        <div
+            className={`stop-item ${isDragging ? 'dragging' : ''}`}
+            draggable
+            onDragStart={e => onDragStart(e, index)}
+            onDragOver={e => onDragOver(e)}
+            onDrop={e => onDrop(e, index)}
+        >
+            <div className="stop-handle">⋮⋮</div>
+            <div className="stop-content">
+                {isEditing ? (
+                    <input
+                        ref={inputRef}
+                        type="text"
+                        value={editValue}
+                        onChange={e => setEditValue(e.target.value)}
+                        onBlur={handleInputBlur}
+                        autoFocus
+                        className="stop-edit-input"
+                        placeholder="Search for a place..."
+                    />
+                ) : (
+                    <div className="stop-name">{stop.name}</div>
+                )}
+                {travelInfo && (
+                    <div className="stop-travel-info">{travelInfo}</div>
+                )}
+            </div>
+            <div className="stop-actions">
+                <button
+                    className="stop-edit-btn"
+                    onClick={handleEditClick}
+                    title="Edit stop location"
+                >
+                    ✏️
+                </button>
+                <button
+                    className="stop-delete-btn"
+                    onClick={() => onDelete(index)}
+                    title="Delete stop"
+                >
+                    🗑️
+                </button>
+            </div>
+        </div>
+    )
+}
+
+// Stops list component with optimize button and round trip toggle
+function StopsList({ stops, onStopsChange, onOptimizeRoute, routeLegs, map, roundTrip, setRoundTrip, userLocation, routeInfo }) {
+    const [draggedIndex, setDraggedIndex] = useState(null)
+
+    const handleDragStart = (e, index) => {
+        setDraggedIndex(index)
+        e.dataTransfer.effectAllowed = 'move'
+    }
+    const handleDragOver = (e) => {
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+    }
+    const handleDrop = (e, dropIndex) => {
+        e.preventDefault()
+        if (draggedIndex === null || draggedIndex === dropIndex) return
+        const newStops = [...stops]
+        const [draggedStop] = newStops.splice(draggedIndex, 1)
+        newStops.splice(dropIndex, 0, draggedStop)
+        onStopsChange(newStops)
+        setDraggedIndex(null)
+    }
+    const handleDelete = (index) => {
+        const newStops = stops.filter((_, i) => i !== index)
+        onStopsChange(newStops)
+    }
+    const handleEdit = (index, updatedStop) => {
+        const newStops = [...stops]
+        newStops[index] = updatedStop
+        onStopsChange(newStops)
+    }
+    // Compose travel info for each stop
+    const getTravelInfo = (i) => {
+        if (!routeLegs || !userLocation) return null
+        if (i === 0) {
+            // First stop: from user
+            const fromYou = routeLegs[0]
+            return fromYou ? `${fromYou.time} from you (${fromYou.distance})` : null
+        } else {
+            // From user and from previous stop
+            const fromYou = routeLegs[i] ? `${routeLegs[i].time} from you (${routeLegs[i].distance})` : null
+            const fromPrev = routeLegs[i] ? `${routeLegs[i].timeFromPrev} from previous stop (${routeLegs[i].distanceFromPrev})` : null
+            return [fromYou, fromPrev].filter(Boolean).join(', ')
+        }
+    }
+    return (
+        <div className="stops-list">
+            <div className="stops-header">
+                <h3>Route Stops</h3>
+                {stops.length > 1 && (
+                    <button
+                        className="optimize-btn"
+                        onClick={onOptimizeRoute}
+                        title="Optimize route order for shortest time"
+                    >
+                        🚀 Optimize
+                    </button>
+                )}
+            </div>
+            {stops.length === 0 ? (
+                <div className="no-stops">No stops added yet. Search for places to add stops.</div>
+            ) : (
+                <div className="stops-container">
+                    {stops.map((stop, index) => (
+                        <StopItem
+                            key={`${stop.lat}-${stop.lng}-${index}`}
+                            stop={stop}
+                            index={index}
+                            onDelete={handleDelete}
+                            onEdit={handleEdit}
+                            onDragStart={handleDragStart}
+                            onDragOver={handleDragOver}
+                            onDrop={handleDrop}
+                            isDragging={draggedIndex === index}
+                            travelInfo={getTravelInfo(index)}
+                            map={map}
+                        />
+                    ))}
+                </div>
+            )}
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                    type="checkbox"
+                    id="round-trip-toggle"
+                    checked={roundTrip}
+                    onChange={e => setRoundTrip(e.target.checked)}
+                />
+                <label htmlFor="round-trip-toggle" style={{ fontSize: 13 }}>
+                    Round Trip (return to start)
+                </label>
+            </div>
+            {routeInfo && (
+                <div className="route-summary" style={{ marginTop: 12, padding: 8, background: '#e3f2fd', borderRadius: 6, fontSize: 13 }}>
+                    <strong>Total Distance:</strong> {routeInfo.totalDistance}<br />
+                    <strong>Total Time:</strong> {routeInfo.totalTime}
+                </div>
+            )}
+        </div>
+    )
+}
+
 // Floating menu component
-function FloatingMenu({ toggles, setToggles, mapType, setMapType, map, onPlaceSelected }) {
+function FloatingMenu({ toggles, setToggles, mapType, setMapType, manualMapType, setManualMapType, map, onAddStop, stops, onStopsChange, onOptimizeRoute, routeLegs, roundTrip, setRoundTrip, userLocation, routeInfo }) {
     return (
         <div className="floating-menu">
             <div className="floating-menu-title">Map Options</div>
-
-            <SearchBar map={map} onPlaceSelected={onPlaceSelected} />
-
+            <SearchBar
+                map={map}
+                onAddStop={onAddStop}
+            />
+            <StopsList
+                stops={stops}
+                onStopsChange={onStopsChange}
+                onOptimizeRoute={onOptimizeRoute}
+                routeLegs={routeLegs}
+                map={map}
+                roundTrip={roundTrip}
+                setRoundTrip={setRoundTrip}
+                userLocation={userLocation}
+                routeInfo={routeInfo}
+            />
             <div className="toggle-group">
                 <div className="toggle-item">
                     <input
@@ -167,7 +383,11 @@ function FloatingMenu({ toggles, setToggles, mapType, setMapType, map, onPlaceSe
                         type="checkbox"
                         id="satellite-toggle"
                         checked={mapType === 'hybrid'}
-                        onChange={e => setMapType(e.target.checked ? 'hybrid' : 'roadmap')}
+                        onChange={e => {
+                            const newMapType = e.target.checked ? 'hybrid' : 'roadmap'
+                            setMapType(newMapType)
+                            setManualMapType(newMapType)
+                        }}
                     />
                     <label htmlFor="satellite-toggle">Satellite</label>
                 </div>
@@ -176,10 +396,24 @@ function FloatingMenu({ toggles, setToggles, mapType, setMapType, map, onPlaceSe
     )
 }
 
+// Helper to compute distance between two LatLng points in meters
+function computeDistanceMeters(a, b) {
+    const R = 6371000 // Earth radius in meters
+    const toRad = x => x * Math.PI / 180
+    const dLat = toRad(b.lat() - a.lat())
+    const dLng = toRad(b.lng() - a.lng())
+    const lat1 = toRad(a.lat())
+    const lat2 = toRad(b.lat())
+    const aVal = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.sin(dLng/2) * Math.sin(dLng/2) * Math.cos(lat1) * Math.cos(lat2)
+    const c = 2 * Math.atan2(Math.sqrt(aVal), Math.sqrt(1-aVal))
+    return R * c
+}
+
 export default function Map() {
     const mapRef = useRef(null)
     const [map, setMap] = useState(null)
     const [mapType, setMapType] = useState('roadmap')
+    const [manualMapType, setManualMapType] = useState('roadmap')
 
     const [toggles, setToggles] = useState({
         showTraffic: false,
@@ -188,8 +422,30 @@ export default function Map() {
         showAreas: false
     })
     const [userLocation, setUserLocation] = useState(null)
-    const [targetMarker, setTargetMarker] = useState(null)
+    const [stops, setStops] = useState([])
     const [clickedMarkers, setClickedMarkers] = useState([])
+    const [directionsRenderer, setDirectionsRenderer] = useState(null)
+    const [routeInfo, setRouteInfo] = useState(null)
+    const [roundTrip, setRoundTrip] = useState(false)
+    const [routeLegs, setRouteLegs] = useState(null)
+    const [animatedPolyline, setAnimatedPolyline] = useState(null)
+    const antsAnimationRef = useRef(null)
+    const [currentZoom, setCurrentZoom] = useState(13)
+    const [popupInfo, setPopupInfo] = useState(null)
+    
+    // Use refs to access current state in event listeners
+    const stopsRef = useRef(stops)
+    const clickedMarkersRef = useRef(clickedMarkers)
+    
+    // Update refs when state changes
+    useEffect(() => {
+        stopsRef.current = stops
+    }, [stops])
+    
+    useEffect(() => {
+        clickedMarkersRef.current = clickedMarkers
+    }, [clickedMarkers])
+
     // Main map logic
     useEffect(() => {
         let loader = new Loader({
@@ -210,6 +466,7 @@ export default function Map() {
                 streetViewControl: false,
                 fullscreenControl: false,
                 mapTypeControl: false,
+                tilt: 0,
                 styles: [
                     ...(toggles.showStreets ? [] : streetLabelStyles),
                     ...(toggles.showAreas ? [] : areaLabelStyles),
@@ -224,39 +481,79 @@ export default function Map() {
                     lng: event.latLng.lng()
                 }
                 setClickedMarkers(prev => [...prev, clickedPosition])
+                // Close popup when clicking on map
+                setPopupInfo(null)
             })
 
-            // Add right-click event listener for deleting markers
+            // Add zoom change listener for automatic hybrid view and tilt
+            mapInstance.addListener('zoom_changed', () => {
+                const currentZoom = mapInstance.getZoom()
+                if (currentZoom >= 18) {
+                    mapInstance.setMapTypeId('hybrid')
+                    mapInstance.setTilt(45)
+                    setMapType('hybrid')
+                } else if (currentZoom < 16) {
+                    mapInstance.setMapTypeId(manualMapType)
+                    mapInstance.setTilt(0)
+                    setMapType(manualMapType)
+                }
+            })
+
+            // Right click to show popup for markers
             mapInstance.addListener('rightclick', (event) => {
+                // Prevent default Google Maps context menu
+                event.stop()
+                
                 const clickPosition = {
                     lat: event.latLng.lat(),
                     lng: event.latLng.lng()
                 }
 
-                // Calculate threshold based on zoom level
                 const zoom = mapInstance.getZoom()
-                const threshold = Math.pow(2, 15 - zoom) * 0.001 // Scales with zoom
+                const threshold = Math.pow(2, 15 - zoom) * 0.001
 
-                // Get current state values for comparison
-                setClickedMarkers(prevClickedMarkers => {
-                    // Check if right-click is near any clicked markers
-                    const closestClickedMarker = findClosestMarker(clickPosition, prevClickedMarkers, threshold)
-                    if (closestClickedMarker) {
-                        return prevClickedMarkers.filter((_, index) => index !== closestClickedMarker.index)
-                    }
-                    return prevClickedMarkers
-                })
+                console.log('Right click detected at:', clickPosition)
+                console.log('Threshold:', threshold)
+                console.log('Current stops (from ref):', stopsRef.current)
+                console.log('Current clicked markers (from ref):', clickedMarkersRef.current)
 
-                // Check if right-click is near target marker
-                setTargetMarker(prevTargetMarker => {
-                    if (prevTargetMarker) {
-                        const distanceToTarget = calculateDistance(clickPosition, prevTargetMarker)
-                        if (distanceToTarget <= threshold) {
-                            return null
-                        }
-                    }
-                    return prevTargetMarker
-                })
+                // Check if right-click is near any clicked markers
+                const closestClickedMarker = findClosestMarker(clickPosition, clickedMarkersRef.current, threshold)
+                if (closestClickedMarker) {
+                    console.log('Found clicked marker:', closestClickedMarker)
+                    // Get screen coordinates from the event
+                    const screenX = event.domEvent.clientX
+                    const screenY = event.domEvent.clientY
+                    
+                    setPopupInfo({
+                        type: 'clicked',
+                        position: { x: screenX, y: screenY },
+                        index: closestClickedMarker.index,
+                        marker: closestClickedMarker.marker
+                    })
+                    return
+                }
+
+                // Check if right-click is near any stops
+                const closestStop = findClosestMarker(clickPosition, stopsRef.current, threshold)
+                if (closestStop) {
+                    console.log('Found stop:', closestStop)
+                    // Get screen coordinates from the event
+                    const screenX = event.domEvent.clientX
+                    const screenY = event.domEvent.clientY
+                    
+                    setPopupInfo({
+                        type: 'stop',
+                        position: { x: screenX, y: screenY },
+                        index: closestStop.index,
+                        marker: closestStop.marker
+                    })
+                    return
+                }
+
+                console.log('No markers found near click')
+                // If not near any markers, close popup
+                setPopupInfo(null)
             })
 
             setMap(mapInstance)
@@ -313,15 +610,327 @@ export default function Map() {
         )
     }, [map])
 
-    // Add marker for searched place
-    const handlePlaceSelected = ({ lat, lng, name }) => {
-        setTargetMarker({ lat, lng, name })
+    // Add stop to the list
+    const handleAddStop = ({ lat, lng, name }) => {
+        setStops(prev => [...prev, { lat, lng, name }])
         if (map) {
             map.panTo({ lat, lng })
         }
     }
 
-    // Helper function to calculate distance between two points (simple approximation)
+    // Listen for zoom changes to update dot size
+    useEffect(() => {
+        if (!map) return
+        const zoomListener = map.addListener('zoom_changed', () => {
+            setCurrentZoom(map.getZoom())
+        })
+        setCurrentZoom(map.getZoom())
+        return () => {
+            window.google.maps.event.removeListener(zoomListener)
+        }
+    }, [map])
+
+    // Update route when stops or roundTrip changes
+    useEffect(() => {
+        if (!map || !userLocation || stops.length === 0) {
+            if (directionsRenderer) {
+                directionsRenderer.setDirections({ routes: [] })
+                setRouteInfo(null)
+                setRouteLegs(null)
+            }
+            if (animatedPolyline) {
+                animatedPolyline.setMap(null)
+                setAnimatedPolyline(null)
+            }
+            if (antsAnimationRef.current) {
+                clearInterval(antsAnimationRef.current)
+                antsAnimationRef.current = null
+            }
+            return
+        }
+        if (directionsRenderer) {
+            directionsRenderer.setDirections({ routes: [] })
+        }
+        const directionsService = new window.google.maps.DirectionsService()
+        const renderer = new window.google.maps.DirectionsRenderer({
+            suppressMarkers: true,
+            polylineOptions: {
+                strokeColor: '#4285F4',
+                strokeWeight: 4,
+                strokeOpacity: 0.7
+            }
+        })
+        renderer.setMap(map)
+        setDirectionsRenderer(renderer)
+        // Prepare waypoints (all stops except the last one)
+        let waypoints = stops.slice(0, -1).map(stop => ({
+            location: new window.google.maps.LatLng(stop.lat, stop.lng),
+            stopover: true
+        }))
+        // Last stop is the destination
+        let destination = stops[stops.length - 1]
+        // If round trip, destination is userLocation
+        if (roundTrip) {
+            waypoints = stops.map(stop => ({
+                location: new window.google.maps.LatLng(stop.lat, stop.lng),
+                stopover: true
+            }))
+            destination = userLocation
+        }
+        directionsService.route(
+            {
+                origin: userLocation,
+                destination: destination,
+                waypoints: waypoints,
+                travelMode: window.google.maps.TravelMode.DRIVING,
+                provideRouteAlternatives: true,
+                optimizeWaypoints: false
+            },
+            (result, status) => {
+                if (status === 'OK') {
+                    renderer.setDirections(result)
+                    const route = result.routes[0]
+                    const legs = route.legs
+                    // Marching ants: moving dots with constant speed
+                    if (animatedPolyline) {
+                        animatedPolyline.setMap(null)
+                    }
+                    if (antsAnimationRef.current) {
+                        clearInterval(antsAnimationRef.current)
+                        antsAnimationRef.current = null
+                    }
+                    const path = route.overview_path
+                    // Compute total length in meters
+                    let totalLength = 0
+                    for (let i = 1; i < path.length; i++) {
+                        totalLength += computeDistanceMeters(path[i-1], path[i])
+                    }
+                    // Dot symbol: half transparent black, scale by zoom
+                    const getDotScale = (zoom) => {
+                        if (zoom >= 18) return 5
+                        if (zoom >= 15) return 4
+                        if (zoom >= 12) return 3
+                        if (zoom >= 10) return 2
+                        return 1.5
+                    }
+                    const dotSymbol = {
+                        path: window.google.maps.SymbolPath.CIRCLE,
+                        fillColor: '#000',
+                        fillOpacity: 0.5,
+                        scale: getDotScale(map.getZoom()),
+                        strokeColor: '#000',
+                        strokeWeight: 1,
+                        strokeOpacity: 0.5
+                    }
+                    // Fewer dots: increase repeatMeters
+                    const repeatMeters = 100
+                    const repeatPercent = (repeatMeters / totalLength) * 100
+                    let offsetPercent = 0
+                    const animatedLine = new window.google.maps.Polyline({
+                        path: path,
+                        strokeColor: '#000',
+                        strokeWeight: 0,
+                        strokeOpacity: 0,
+                        icons: [{
+                            icon: dotSymbol,
+                            offset: '0%',
+                            repeat: `${repeatPercent}%`
+                        }]
+                    })
+                    animatedLine.setMap(map)
+                    setAnimatedPolyline(animatedLine)
+                    // Animate the offset at a constant speed (e.g., 60 meters/sec)
+                    const speedMetersPerSec = 60
+                    const intervalMs = 40
+                    const stepPercent = (speedMetersPerSec * (intervalMs/1000) / totalLength) * 100
+                    antsAnimationRef.current = setInterval(() => {
+                        offsetPercent = (offsetPercent + stepPercent) % 100
+                        // Update scale if zoom changed (handled in separate effect now)
+                        animatedLine.set('icons', [{
+                            icon: dotSymbol,
+                            offset: `${offsetPercent}%`,
+                            repeat: `${repeatPercent}%`
+                        }])
+                    }, intervalMs)
+                    // ... per-stop info and routeInfo ...
+                    const newRouteLegs = stops.map((stop, i) => {
+                        let time = '', distance = '', timeFromPrev = '', distanceFromPrev = ''
+                        if (i < legs.length) {
+                            time = legs[i].duration.text
+                            distance = legs[i].distance.text
+                        }
+                        if (i > 0 && i < legs.length) {
+                            timeFromPrev = legs[i].duration.text
+                            distanceFromPrev = legs[i].distance.text
+                        }
+                        return { time, distance, timeFromPrev, distanceFromPrev }
+                    })
+                    setRouteLegs(newRouteLegs)
+                    const totalDistanceKm = route.legs.reduce((total, leg) => total + leg.distance.value, 0) / 1000
+                    const totalTimeMinutes = route.legs.reduce((total, leg) => total + leg.duration.value, 0) / 60
+                    
+                    // Convert to miles and format time
+                    const totalDistanceMiles = (totalDistanceKm * 0.621371).toFixed(1)
+                    const hours = Math.floor(totalTimeMinutes / 60)
+                    const minutes = Math.round(totalTimeMinutes % 60)
+                    const timeString = hours > 0 ? `${hours}hr ${minutes}m` : `${minutes}m`
+                    
+                    setRouteInfo({
+                        totalDistance: `${totalDistanceMiles} mi`,
+                        totalTime: timeString
+                    })
+                } else {
+                    setRouteLegs(null)
+                    setRouteInfo(null)
+                    if (animatedPolyline) {
+                        animatedPolyline.setMap(null)
+                        setAnimatedPolyline(null)
+                    }
+                    if (antsAnimationRef.current) {
+                        clearInterval(antsAnimationRef.current)
+                        antsAnimationRef.current = null
+                    }
+                }
+            }
+        )
+        // Cleanup on unmount
+        return () => {
+            if (animatedPolyline) {
+                animatedPolyline.setMap(null)
+                setAnimatedPolyline(null)
+            }
+            if (antsAnimationRef.current) {
+                clearInterval(antsAnimationRef.current)
+                antsAnimationRef.current = null
+            }
+        }
+    }, [map, userLocation, stops, roundTrip])
+
+    // Update dot scale on zoom without resetting route
+    useEffect(() => {
+        if (!animatedPolyline || !map) return
+        const getDotScale = (zoom) => {
+            if (zoom >= 18) return 5
+            if (zoom >= 15) return 4
+            if (zoom >= 12) return 3
+            if (zoom >= 10) return 2
+            return 1.5
+        }
+        const icons = animatedPolyline.get('icons')
+        if (icons && icons[0]) {
+            icons[0].icon.scale = getDotScale(map.getZoom())
+            animatedPolyline.set('icons', icons)
+        }
+    }, [animatedPolyline, map, currentZoom])
+
+    // Route optimization using Traveling Salesman Problem approximation
+    const optimizeRoute = async () => {
+        if (stops.length <= 2) return
+
+        // Create distance matrix between all points (including user location)
+        const allPoints = [userLocation, ...stops]
+        const distanceMatrix = []
+
+        for (let i = 0; i < allPoints.length; i++) {
+            distanceMatrix[i] = []
+            for (let j = 0; j < allPoints.length; j++) {
+                if (i === j) {
+                    distanceMatrix[i][j] = 0
+                } else {
+                    distanceMatrix[i][j] = calculateDistance(allPoints[i], allPoints[j])
+                }
+            }
+        }
+
+        let optimizedOrder
+        if (roundTrip) {
+            // For round trips: optimize total distance including return to start
+            // Use nearest neighbor but consider the return journey
+            optimizedOrder = [0] // Start with user location
+            const unvisited = Array.from({ length: allPoints.length - 1 }, (_, i) => i + 1)
+
+            while (unvisited.length > 0) {
+                const current = optimizedOrder[optimizedOrder.length - 1]
+                let bestNext = unvisited[0]
+                let bestTotalCost = Infinity
+
+                // For each unvisited stop, calculate total cost including return to start
+                for (let i = 0; i < unvisited.length; i++) {
+                    const candidate = unvisited[i]
+                    const costToCandidate = distanceMatrix[current][candidate]
+                    
+                    // Calculate cost of remaining stops + return to start
+                    let remainingCost = 0
+                    const remainingStops = unvisited.filter((_, index) => index !== i)
+                    
+                    if (remainingStops.length > 0) {
+                        // Estimate remaining cost using nearest neighbor for remaining stops
+                        let tempCurrent = candidate
+                        const tempRemaining = [...remainingStops]
+                        
+                        while (tempRemaining.length > 0) {
+                            let nearest = tempRemaining[0]
+                            let minDist = distanceMatrix[tempCurrent][nearest]
+                            
+                            for (let j = 1; j < tempRemaining.length; j++) {
+                                const dist = distanceMatrix[tempCurrent][tempRemaining[j]]
+                                if (dist < minDist) {
+                                    minDist = dist
+                                    nearest = tempRemaining[j]
+                                }
+                            }
+                            remainingCost += minDist
+                            tempCurrent = nearest
+                            tempRemaining.splice(tempRemaining.indexOf(nearest), 1)
+                        }
+                        
+                        // Add cost to return to start
+                        remainingCost += distanceMatrix[tempCurrent][0]
+                    } else {
+                        // This is the last stop, just add return cost
+                        remainingCost = distanceMatrix[candidate][0]
+                    }
+                    
+                    const totalCost = costToCandidate + remainingCost
+                    if (totalCost < bestTotalCost) {
+                        bestTotalCost = totalCost
+                        bestNext = candidate
+                    }
+                }
+
+                optimizedOrder.push(bestNext)
+                unvisited.splice(unvisited.indexOf(bestNext), 1)
+            }
+        } else {
+            // For one-way trips: simple nearest neighbor (current logic)
+            optimizedOrder = [0] // Start with user location
+            const unvisited = Array.from({ length: allPoints.length - 1 }, (_, i) => i + 1)
+
+            while (unvisited.length > 0) {
+                const current = optimizedOrder[optimizedOrder.length - 1]
+                let nearest = unvisited[0]
+                let minDistance = distanceMatrix[current][nearest]
+
+                for (let i = 1; i < unvisited.length; i++) {
+                    const candidate = unvisited[i]
+                    const distance = distanceMatrix[current][candidate]
+                    if (distance < minDistance) {
+                        minDistance = distance
+                        nearest = candidate
+                    }
+                }
+
+                optimizedOrder.push(nearest)
+                unvisited.splice(unvisited.indexOf(nearest), 1)
+            }
+        }
+
+        // Reorder stops based on optimization (skip user location)
+        const optimizedStops = optimizedOrder.slice(1).map(index => stops[index - 1])
+        setStops(optimizedStops)
+    }
+
+    // Helper function to calculate distance between two points
     const calculateDistance = (point1, point2) => {
         const latDiff = point1.lat - point2.lat
         const lngDiff = point1.lng - point2.lng
@@ -344,6 +953,16 @@ export default function Map() {
         return closestMarker
     }
 
+    // Handle popup actions
+    const handleDeleteMarker = (type, index) => {
+        if (type === 'clicked') {
+            setClickedMarkers(prev => prev.filter((_, i) => i !== index))
+        } else if (type === 'stop') {
+            setStops(prev => prev.filter((_, i) => i !== index))
+        }
+        setPopupInfo(null)
+    }
+
     // Map container style
     const mapContainerStyle = {
         width: '100%',
@@ -359,26 +978,84 @@ export default function Map() {
                 setToggles={setToggles}
                 mapType={mapType}
                 setMapType={setMapType}
+                manualMapType={manualMapType}
+                setManualMapType={setManualMapType}
                 map={map}
-                onPlaceSelected={handlePlaceSelected}
+                onAddStop={handleAddStop}
+                stops={stops}
+                onStopsChange={setStops}
+                onOptimizeRoute={optimizeRoute}
+                routeLegs={routeLegs}
+                roundTrip={roundTrip}
+                setRoundTrip={setRoundTrip}
+                userLocation={userLocation}
+                routeInfo={routeInfo}
             />
             {/* User location marker */}
             {userLocation && map && (
                 <PulsingMarker map={map} position={userLocation} color="#1abc9c" />
             )}
-            {/* Target marker */}
-            {targetMarker && map && (
-                <PulsingMarker map={map} position={targetMarker} color="#2980ff" />
-            )}
+            {/* Stop markers */}
+            {stops.map((stop, index) => (
+                <PulsingMarker
+                    key={`${stop.lat}-${stop.lng}-${index}`}
+                    map={map}
+                    position={stop}
+                    color={index === stops.length - 1 ? "#e74c3c" : "#f39c12"}
+                />
+            ))}
             {/* Clicked markers */}
             {clickedMarkers.map((marker, index) => (
                 <PulsingMarker
                     key={index}
                     map={map}
                     position={marker}
-                    color="#e74c3c"
+                    color="#9b59b6"
                 />
             ))}
+            {/* Popup for marker actions */}
+            {popupInfo && (
+                <div 
+                    className="marker-popup"
+                    style={{
+                        position: 'fixed',
+                        left: popupInfo.position.x,
+                        top: popupInfo.position.y,
+                        background: 'white',
+                        border: '2px solid #dc3545',
+                        borderRadius: '6px',
+                        padding: '12px',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                        zIndex: 9999,
+                        transform: 'translate(-50%, -100%)',
+                        marginTop: '-10px',
+                        minWidth: '120px',
+                        textAlign: 'center'
+                    }}
+                >
+                    <div style={{ marginBottom: '8px', fontSize: '12px', color: '#666' }}>
+                        {popupInfo.type === 'stop' ? 'Route Stop' : 'Clicked Marker'}
+                    </div>
+                    <button 
+                        onClick={() => handleDeleteMarker(popupInfo.type, popupInfo.index)}
+                        style={{
+                            background: '#dc3545',
+                            color: 'white',
+                            border: 'none',
+                            padding: '6px 12px',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            width: '100%'
+                        }}
+                        onMouseOver={(e) => e.target.style.background = '#c82333'}
+                        onMouseOut={(e) => e.target.style.background = '#dc3545'}
+                    >
+                        Delete {popupInfo.type === 'stop' ? 'Stop' : 'Marker'}
+                    </button>
+                </div>
+            )}
         </div>
     )
 }
