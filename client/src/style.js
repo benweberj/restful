@@ -86,6 +86,8 @@ export const GlobalStyle = createGlobalStyle`
         max-width: 400px;
         height: auto;
         min-height: 0;
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
         backdrop-filter: blur(10px);
     }
 
@@ -196,7 +198,7 @@ export const GlobalStyle = createGlobalStyle`
         display: flex;
         flex-direction: column;
         gap: 8px;
-        max-height: calc(100vh - 300px);
+        max-height: calc(100vh - 400px);
         overflow-y: auto;
     }
 

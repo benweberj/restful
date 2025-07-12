@@ -21,7 +21,7 @@ const placeLabelStyles = [
 ]
 
 // Pulsing marker helper
-function PulsingMarker({ map, position, color }) {
+function PulsingMarker({ map, position, color, size = 'normal', number, isDestination = false }) {
     const markerRef = useRef(null)
 
     useEffect(() => {
@@ -33,18 +33,35 @@ function PulsingMarker({ map, position, color }) {
             markerRef.current = null
         }
 
+        // Determine marker size
+        const markerSize = size === 'small' ? 12 : 18
+
         // Create a custom overlay for pulsing effect
         const markerDiv = document.createElement('div')
         markerDiv.className = 'pulsing-marker'
         markerDiv.style.background = color
         markerDiv.style.border = `2px solid ${color}`
-        markerDiv.style.width = '18px'
-        markerDiv.style.height = '18px'
+        markerDiv.style.width = `${markerSize}px`
+        markerDiv.style.height = `${markerSize}px`
         markerDiv.style.borderRadius = '50%'
         markerDiv.style.boxShadow = `0 0 0 0 ${color}55`
         markerDiv.style.position = 'absolute'
         markerDiv.style.transform = 'translate(-50%, -50%)'
         markerDiv.style.animation = 'pulse 1.5s infinite'
+        markerDiv.style.display = 'flex'
+        markerDiv.style.alignItems = 'center'
+        markerDiv.style.justifyContent = 'center'
+        markerDiv.style.fontSize = size === 'small' ? '8px' : '10px'
+        markerDiv.style.fontWeight = 'bold'
+        markerDiv.style.color = 'white'
+        markerDiv.style.textShadow = '1px 1px 1px rgba(0,0,0,0.5)'
+
+        // Add number or star
+        if (isDestination) {
+            markerDiv.textContent = '★'
+        } else if (number !== undefined) {
+            markerDiv.textContent = number.toString()
+        }
 
         // Custom OverlayView
         class CustomMarker extends window.google.maps.OverlayView {
@@ -74,7 +91,7 @@ function PulsingMarker({ map, position, color }) {
         return () => {
             if (markerRef.current) markerRef.current.setMap(null)
         }
-    }, [map, position, color])
+    }, [map, position, color, size, number, isDestination])
 
     return null
 }
@@ -475,12 +492,17 @@ export default function Map() {
             })
 
             // Add click event listener
-            mapInstance.addListener('click', (event) => {
+            mapInstance.addListener('click', async (event) => {
                 const clickedPosition = {
                     lat: event.latLng.lat(),
                     lng: event.latLng.lng()
                 }
-                setClickedMarkers(prev => [...prev, clickedPosition])
+                
+                // Get a smart name for the clicked position
+                const smartName = await getSmartLocationName(clickedPosition.lat, clickedPosition.lng)
+                const markerWithName = { ...clickedPosition, name: smartName }
+                
+                setClickedMarkers(prev => [...prev, markerWithName])
                 // Close popup when clicking on map
                 setPopupInfo(null)
             })
@@ -953,6 +975,51 @@ export default function Map() {
         return closestMarker
     }
 
+    // Get smart location name using reverse geocoding
+    const getSmartLocationName = async (lat, lng) => {
+        if (!map || !window.google) return `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+
+        try {
+            // Use reverse geocoding to get location information
+            const geocoder = new window.google.maps.Geocoder()
+            const geocodeResult = await geocoder.geocode({ location: { lat, lng } })
+
+            if (geocodeResult.results && geocodeResult.results.length > 0) {
+                const result = geocodeResult.results[0]
+                const addressComponents = result.address_components
+
+                // Try to get street address first
+                const streetNumber = addressComponents.find(comp => comp.types.includes('street_number'))
+                const route = addressComponents.find(comp => comp.types.includes('route'))
+                
+                if (streetNumber && route) {
+                    return `${streetNumber.long_name} ${route.long_name}`
+                }
+
+                // Try to get neighborhood
+                const neighborhood = addressComponents.find(comp => comp.types.includes('sublocality'))
+                if (neighborhood) {
+                    return neighborhood.long_name
+                }
+
+                // Try to get city
+                const city = addressComponents.find(comp => comp.types.includes('locality'))
+                if (city) {
+                    return city.long_name
+                }
+
+                // Fallback to formatted address
+                return result.formatted_address
+            }
+
+            // Final fallback to coordinates
+            return `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        } catch (error) {
+            console.error('Error getting location name:', error)
+            return `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        }
+    }
+
     // Handle popup actions
     const handleDeleteMarker = (type, index) => {
         if (type === 'clicked') {
@@ -960,6 +1027,55 @@ export default function Map() {
         } else if (type === 'stop') {
             setStops(prev => prev.filter((_, i) => i !== index))
         }
+        setPopupInfo(null)
+    }
+
+    // Handle adding clicked marker to route optimally
+    const handleAddToRoute = async (clickedMarkerIndex) => {
+        const clickedMarker = clickedMarkers[clickedMarkerIndex]
+        if (!clickedMarker || !userLocation) return
+
+        // Get a smart name for the marker
+        const smartName = await getSmartLocationName(clickedMarker.lat, clickedMarker.lng)
+        const markerWithName = { ...clickedMarker, name: smartName }
+
+        // Find the optimal position to insert this marker
+        let bestPosition = 0
+        let bestTotalDistance = Infinity
+
+        // Try inserting at each position in the current route
+        for (let i = 0; i <= stops.length; i++) {
+            const testStops = [...stops]
+            testStops.splice(i, 0, markerWithName)
+            
+            // Calculate total distance for this insertion
+            let totalDistance = 0
+            let currentPoint = userLocation
+            
+            for (let j = 0; j < testStops.length; j++) {
+                const nextPoint = testStops[j]
+                totalDistance += calculateDistance(currentPoint, nextPoint)
+                currentPoint = nextPoint
+            }
+            
+            // If round trip, add return distance
+            if (roundTrip) {
+                totalDistance += calculateDistance(currentPoint, userLocation)
+            }
+            
+            if (totalDistance < bestTotalDistance) {
+                bestTotalDistance = totalDistance
+                bestPosition = i
+            }
+        }
+
+        // Insert the marker at the optimal position
+        const newStops = [...stops]
+        newStops.splice(bestPosition, 0, markerWithName)
+        setStops(newStops)
+        
+        // Remove the clicked marker
+        setClickedMarkers(prev => prev.filter((_, i) => i !== clickedMarkerIndex))
         setPopupInfo(null)
     }
 
@@ -1001,7 +1117,9 @@ export default function Map() {
                     key={`${stop.lat}-${stop.lng}-${index}`}
                     map={map}
                     position={stop}
-                    color={index === stops.length - 1 ? "#e74c3c" : "#f39c12"}
+                    color="#2980ff"
+                    number={index + 1}
+                    isDestination={index === stops.length - 1}
                 />
             ))}
             {/* Clicked markers */}
@@ -1010,7 +1128,8 @@ export default function Map() {
                     key={index}
                     map={map}
                     position={marker}
-                    color="#9b59b6"
+                    color="#2980ff"
+                    size="small"
                 />
             ))}
             {/* Popup for marker actions */}
@@ -1029,13 +1148,34 @@ export default function Map() {
                         zIndex: 9999,
                         transform: 'translate(-50%, -100%)',
                         marginTop: '-10px',
-                        minWidth: '120px',
+                        minWidth: '140px',
                         textAlign: 'center'
                     }}
                 >
                     <div style={{ marginBottom: '8px', fontSize: '12px', color: '#666' }}>
                         {popupInfo.type === 'stop' ? 'Route Stop' : 'Clicked Marker'}
                     </div>
+                    {popupInfo.type === 'clicked' ? (
+                        <button 
+                            onClick={() => handleAddToRoute(popupInfo.index)}
+                            style={{
+                                background: '#28a745',
+                                color: 'white',
+                                border: 'none',
+                                padding: '6px 12px',
+                                borderRadius: '4px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                fontWeight: 'bold',
+                                width: '100%',
+                                marginBottom: '6px'
+                            }}
+                            onMouseOver={(e) => e.target.style.background = '#218838'}
+                            onMouseOut={(e) => e.target.style.background = '#28a745'}
+                        >
+                            ➕ Add to Route
+                        </button>
+                    ) : null}
                     <button 
                         onClick={() => handleDeleteMarker(popupInfo.type, popupInfo.index)}
                         style={{
@@ -1052,7 +1192,7 @@ export default function Map() {
                         onMouseOver={(e) => e.target.style.background = '#c82333'}
                         onMouseOut={(e) => e.target.style.background = '#dc3545'}
                     >
-                        Delete {popupInfo.type === 'stop' ? 'Stop' : 'Marker'}
+                        🗑️ Delete {popupInfo.type === 'stop' ? 'Stop' : 'Marker'}
                     </button>
                 </div>
             )}
