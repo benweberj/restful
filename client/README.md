@@ -1,4 +1,3 @@
-in /server: `npm start` to run server locally on port 5000
 
 in /client: `npm start` to run react client locally on port 3000
 
