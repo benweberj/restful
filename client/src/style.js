@@ -89,7 +89,14 @@ export const GlobalStyle = createGlobalStyle`
         max-height: calc(100vh - 32px);
         overflow-y: auto;
         backdrop-filter: blur(10px);
+        transition: transform .25s ease;
+
+        &.closed {
+            transform: translateX(-110%);
+        }
+            
     }
+
 
     .floating-menu-title {
         margin-bottom: 12px;

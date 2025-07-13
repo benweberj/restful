@@ -1,9 +1,8 @@
 import styled from 'styled-components'
-import Map from './Map'
+import Map from './Map/Map'
 
 const DashboardContainer = styled.div`
     height: 100%;
-    border: 2px solid red;
 `
 
 export default function Dashboard() {
